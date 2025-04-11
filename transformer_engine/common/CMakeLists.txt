@@ -7,7 +7,7 @@ cmake_minimum_required(VERSION 3.21)
 # Language options
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
-    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90 100 120)
+    set(CMAKE_CUDA_ARCHITECTURES 100)
   else ()
     set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
   endif()
@@ -164,7 +164,7 @@ set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
                             fused_softmax/scaled_aligned_causal_masked_softmax.cu
                             PROPERTIES
                             COMPILE_OPTIONS "--use_fast_math")
-option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" OFF)
+option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" ON)
 if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
   set_source_files_properties(activation/gelu.cu
                               activation/relu.cu

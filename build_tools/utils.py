@@ -193,7 +193,7 @@ def cuda_archs() -> str:
     version = cuda_version()
     if os.getenv("NVTE_CUDA_ARCHS") is None:
         os.environ["NVTE_CUDA_ARCHS"] = (
-            "70;80;89;90;100;120" if version >= (12, 8) else "70;80;89;90"
+            "100" if version >= (12, 8) else "70;80;89;90"
         )
     return os.getenv("NVTE_CUDA_ARCHS")
 

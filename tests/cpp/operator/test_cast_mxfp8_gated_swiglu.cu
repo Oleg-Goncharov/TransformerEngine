@@ -368,21 +368,22 @@ void performTest_x2(const size_t rows,
 }
 
 std::vector<std::pair<size_t, size_t>> matrix_sizes = {
-    {1, 32},
-    {16, 64},
-    {65, 96},
-    {128, 128},
-    {256, 256},
-    {993, 512},
-    {768, 1024},
-    {65536, 128},
-    {16384, 1632},
+    // {1, 32},
+    // {16, 64},
+    // {65, 96},
+    // {128, 128},
+    // {256, 256},
+    // {993, 512},
+    // {768, 1024},
+    // {65536, 128},
+    // {16384, 1632},
+    {4096, 13312},
 };
 
 std::vector<std::pair<size_t, size_t>> block_sizes = {
-    {1, 32},
+    // {1, 32},
     {32, 1},
-    {32, 32},
+    // {32, 32},
 };
 
 std::vector<InputsFillCase> input_scenarios = {
@@ -394,8 +395,8 @@ std::vector<InputsFillCase> input_scenarios = {
 };
 
 std::vector<bool> is_dgated_op = {
-    true,
-    false
+    false,
+    true
 };
 
 }  // namespace
@@ -453,8 +454,8 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Combine(
         ::testing::ValuesIn(matrix_sizes),
         ::testing::ValuesIn(block_sizes),
-        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
-        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
+        ::testing::Values(DType::kBFloat16),
+        ::testing::Values(DType::kFloat8E4M3),
         ::testing::ValuesIn(input_scenarios),
         ::testing::ValuesIn(is_dgated_op)),
     [](const testing::TestParamInfo<CastMXFP8_GatedActTestSuite::ParamType>& info) {

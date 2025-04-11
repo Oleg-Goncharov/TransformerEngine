@@ -1117,8 +1117,8 @@ void fp8_quantize_arch_ge_100(const Tensor &input, const Tensor *act_input, cons
     case NVTE_DELAYED_TENSOR_SCALING: {
       if (!IS_DBIAS && !IS_DACT) {
         if (is_full_tile_1D_tensor(output) && is_fp8_dtype(output->dtype()) &&
-            is_aligned_tensor_data(input, TMA_gmem_alignment) &&
-            is_aligned_tensor_data(*output, TMA_gmem_alignment)) {
+            is_aligned_tensor_data(input, TMA_GMEM_ALIGNMENT) &&
+            is_aligned_tensor_data(*output, TMA_GMEM_ALIGNMENT)) {
           // Aligned AND FP8
           cast_fp8_1D<IS_ACT, ParamOP, OP>(input, output, stream);
         } else {
@@ -1127,9 +1127,9 @@ void fp8_quantize_arch_ge_100(const Tensor &input, const Tensor *act_input, cons
         }
       } else if (!IS_DBIAS && IS_DACT) {
         if (dimensions_supported_by_TMA(output) && is_fp8_dtype(output->dtype()) &&
-            is_aligned_tensor_data(input, TMA_gmem_alignment) &&
-            is_aligned_tensor_data(*output, TMA_gmem_alignment) &&
-            is_aligned_tensor_data(*act_input, TMA_gmem_alignment)) {
+            is_aligned_tensor_data(input, TMA_GMEM_ALIGNMENT) &&
+            is_aligned_tensor_data(*output, TMA_GMEM_ALIGNMENT) &&
+            is_aligned_tensor_data(*act_input, TMA_GMEM_ALIGNMENT)) {
           // Aligned AND FP8 (+dAct)
           cast_fp8_2D<IS_DBIAS, IS_DACT, ParamOP, OP>(input, act_input, output, dbias, workspace,
                                                       stream);
@@ -1234,58 +1234,58 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, const NVTETe
   auto workspace_tensor = reinterpret_cast<Tensor *>(workspace);
   const auto noop_tensor = noop != nullptr ? *(reinterpret_cast<const Tensor *>(noop)) : Tensor();
 
-  switch (output_tensor->scaling_mode) {
-    case NVTE_DELAYED_TENSOR_SCALING: {
-      if (output_tensor->has_columnwise_data()) {
-        NVTE_CHECK(output_tensor->has_data(),
-                   "Quantizing in only the columnwise direction not supported yet!");
-        if constexpr (!IS_DBIAS && !IS_DACT && !IS_ACT) {
-          cast_transpose(*input_tensor, noop_tensor, output_tensor, stream);
-        } else {
-          cast_transpose_fused<IS_DBIAS, IS_DACT, IS_ACT, float, ParamOP, OP>(
-              *input_tensor, activation_input_tensor, output_tensor, dbias_tensor, workspace_tensor,
-              stream);
-        }
-      } else if (output_tensor->has_data()) {
-        fp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
-            *input_tensor, activation_input_tensor, &noop_tensor, output_tensor, dbias_tensor,
-            workspace_tensor, stream);
-      }
-      break;
-    }
-    case NVTE_MXFP8_1D_SCALING: {
-      mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
-          *input_tensor, activation_input_tensor, &noop_tensor, output_tensor, dbias_tensor,
-          workspace_tensor, stream);
-      break;
-    }
-    case NVTE_BLOCK_SCALING_2D: {
-      // TODO(kwyss): IS_BIAS, IS_DACT, IS_ACT, ParamOP, OP parameters support.
-      NVTE_CHECK((!IS_DBIAS && !IS_DACT && !IS_ACT),
-                 "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_BLOCK_SCALING_2D");
-      constexpr bool force_pow_2_scales = true;
-      quantize_transpose_square_blockwise(
-          input_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
-          output_tensor->data, output_tensor->columnwise_data,
-          /*epsilon=*/0.0,
-          /*return_transpose=*/output_tensor->has_columnwise_data(), force_pow_2_scales, stream);
-      break;
-    }
-    case NVTE_BLOCK_SCALING_1D: {
-      // TODO(kwyss): IS_BIAS, IS_DACT, IS_ACT, ParamOP, OP parameters support.
-      NVTE_CHECK((!IS_DBIAS && !IS_DACT && !IS_ACT),
-                 "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_BLOCK_SCALING_1D");
-      constexpr bool force_pow_2_scales = true;
-      quantize_transpose_vector_blockwise(
-          input_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
-          output_tensor->data, output_tensor->columnwise_data,
-          /*epsilon=*/0.0,
-          /*return_transpose=*/output_tensor->has_columnwise_data(), force_pow_2_scales, stream);
-      break;
-    }
-    default:
-      NVTE_ERROR("Not implemented scaling mode: " + to_string(output_tensor->scaling_mode) + ".");
-  }
+  // switch (output_tensor->scaling_mode) {
+  //   case NVTE_DELAYED_TENSOR_SCALING: {
+  //     if (output_tensor->has_columnwise_data()) {
+  //       NVTE_CHECK(output_tensor->has_data(),
+  //                  "Quantizing in only the columnwise direction not supported yet!");
+  //       if constexpr (!IS_DBIAS && !IS_DACT && !IS_ACT) {
+  //         cast_transpose(*input_tensor, noop_tensor, output_tensor, stream);
+  //       } else {
+  //         cast_transpose_fused<IS_DBIAS, IS_DACT, IS_ACT, float, ParamOP, OP>(
+  //             *input_tensor, activation_input_tensor, output_tensor, dbias_tensor, workspace_tensor,
+  //             stream);
+  //       }
+  //     } else if (output_tensor->has_data()) {
+  //       fp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
+  //           *input_tensor, activation_input_tensor, &noop_tensor, output_tensor, dbias_tensor,
+  //           workspace_tensor, stream);
+  //     }
+  //     break;
+  //   }
+  //   case NVTE_MXFP8_1D_SCALING: {
+  //     mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
+  //         *input_tensor, activation_input_tensor, &noop_tensor, output_tensor, dbias_tensor,
+  //         workspace_tensor, stream);
+  //     break;
+  //   }
+  //   case NVTE_BLOCK_SCALING_2D: {
+  //     // TODO(kwyss): IS_BIAS, IS_DACT, IS_ACT, ParamOP, OP parameters support.
+  //     NVTE_CHECK((!IS_DBIAS && !IS_DACT && !IS_ACT),
+  //                "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_BLOCK_SCALING_2D");
+  //     constexpr bool force_pow_2_scales = true;
+  //     quantize_transpose_square_blockwise(
+  //         input_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
+  //         output_tensor->data, output_tensor->columnwise_data,
+  //         /*epsilon=*/0.0,
+  //         /*return_transpose=*/output_tensor->has_columnwise_data(), force_pow_2_scales, stream);
+  //     break;
+  //   }
+  //   case NVTE_BLOCK_SCALING_1D: {
+  //     // TODO(kwyss): IS_BIAS, IS_DACT, IS_ACT, ParamOP, OP parameters support.
+  //     NVTE_CHECK((!IS_DBIAS && !IS_DACT && !IS_ACT),
+  //                "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_BLOCK_SCALING_1D");
+  //     constexpr bool force_pow_2_scales = true;
+  //     quantize_transpose_vector_blockwise(
+  //         input_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
+  //         output_tensor->data, output_tensor->columnwise_data,
+  //         /*epsilon=*/0.0,
+  //         /*return_transpose=*/output_tensor->has_columnwise_data(), force_pow_2_scales, stream);
+  //     break;
+  //   }
+  //   default:
+  //     NVTE_ERROR("Not implemented scaling mode: " + to_string(output_tensor->scaling_mode) + ".");
+  // }
 }
 
 }  // namespace detail
