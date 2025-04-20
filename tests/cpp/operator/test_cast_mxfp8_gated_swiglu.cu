@@ -19,178 +19,6 @@ using namespace test;
 namespace {
 
 template <bool IS_DGATED, typename IType, typename OType>
-void scale_block(const IType* grad,
-                 const IType* input,
-                 OType* output,
-                 fp8e8m0* output_scales,
-                 const size_t scale_idx,
-                 const size_t scale_idx_gate,
-                 float& thread_amax,
-                 const size_t i_min,
-                 const size_t i_max,
-                 const size_t j_min,
-                 const size_t j_max,
-                 const size_t cols,
-                 std::vector<float>& cached_act,
-                 std::vector<float>& cached_gate) {
-
-    float block_amax = 0.0f;
-    float block_amax_gate = 0.0f;
-    const size_t stride = cols * 2;
-
-    const size_t cached_cols = j_max - j_min;
-
-    // Find the absolute maximum value in the block
-    for (size_t i = i_min; i < i_max; ++i) {
-        for (size_t j = j_min; j < j_max; ++j) {
-            float silu_elt = static_cast<float>(input[i * stride + j]);
-            float gate_elt = static_cast<float>(input[i * stride + cols + j]);
-            float gated_amax_act = 0;
-            float gated_amax_gate = 0;
-            const int cached_idx = (i - i_min) * cached_cols + (j - j_min);
-
-            if constexpr (IS_DGATED) {
-                const float x = silu_elt;
-                const float s = sigmoid(x);
-                const float act_x = x * s;
-                const float dact_x = x * s * (1 - s) + s;
-
-                const float grad_elt = static_cast<float>(grad[i * cols + j]);
-                const float after_dsilu = dact_x * grad_elt * gate_elt;
-                const float after_dgate = act_x * grad_elt;
-                cached_act[cached_idx] = after_dsilu;
-                cached_gate[cached_idx] = after_dgate;
-
-                gated_amax_act = abs(after_dsilu);
-                gated_amax_gate = abs(after_dgate);
-            } else {
-                const float after_silu = silu(silu_elt) * gate_elt;
-                cached_act[cached_idx] = after_silu;
-                gated_amax_act = abs(after_silu);
-            }
-
-            if (gated_amax_act > block_amax) { block_amax = gated_amax_act; }
-            if (gated_amax_gate > block_amax_gate) { block_amax_gate = gated_amax_gate; }
-        }
-    }
-
-    const fp8e8m0 biased_exponent = float_to_e8m0(block_amax *
-                                                  Quantized_Limits<OType>::max_reciprocal());
-    const float scale_reciprocal = exp2f_rcp(biased_exponent);
-    output_scales[scale_idx] = biased_exponent;
-    float scale_reciprocal_gate = 1;
-    if constexpr (IS_DGATED) {
-      const fp8e8m0 biased_exponent = float_to_e8m0(block_amax_gate *
-                                                    Quantized_Limits<OType>::max_reciprocal());
-      scale_reciprocal_gate = exp2f_rcp(biased_exponent);
-      output_scales[scale_idx_gate] = biased_exponent;
-    }
-
-
-    // Quantize elements in the block
-    for (size_t i = i_min; i < i_max; ++i) {
-        for (size_t j = j_min; j < j_max; ++j) {
-            const int cached_idx = (i - i_min) * cached_cols + (j - j_min);
-            if constexpr (IS_DGATED) {
-                const float after_dsilu = cached_act[cached_idx];
-                const float after_dgate = cached_gate[cached_idx];
-                output[i * stride + j] = static_cast<OType>(after_dsilu * scale_reciprocal);
-                output[i * stride + cols + j] = static_cast<OType>(after_dgate *
-                                                                   scale_reciprocal_gate);
-            } else {
-                const float after_silu = cached_act[cached_idx];
-                output[i * cols + j] = static_cast<OType>(after_silu * scale_reciprocal);
-            }
-        }
-    }
-    thread_amax = std::max(thread_amax, block_amax);
-    thread_amax = std::max(thread_amax, block_amax_gate);
-}
-
-template <bool IS_DGATED, typename IType, typename OType>
-void compute_ref_x1(const IType* grad,
-                    const IType* input,
-                    OType* output,
-                    fp8e8m0* output_scales,
-                    float& ref_amax,
-                    const size_t rows,
-                    const size_t cols,
-                    const size_t block_size_Y,
-                    const size_t block_size_X,
-                    const size_t scales_stride) {
-    const size_t tile_size_Y = std::max(32lu, block_size_Y);
-    const size_t tile_size_X = std::max(64lu, block_size_X);
-    const size_t tiles_num_Y = (rows + tile_size_Y - 1) / tile_size_Y;
-    const size_t tiles_num_X = (cols + tile_size_X - 1) / tile_size_X;
-    const size_t blocks_per_tile_Y = tile_size_Y / block_size_Y;
-    const size_t blocks_per_tile_X = tile_size_X / block_size_X;
-
-    float amax = 0;
-    #pragma omp parallel reduction(max: amax) proc_bind(spread)
-    {
-        // Buffers to store (cache) intermediate computations 
-        std::vector<float> cache_buffer_act(block_size_Y * block_size_X);
-        std::vector<float> cache_buffer_gate(block_size_Y * block_size_X);
-        
-        float thread_amax = 0;
-        #pragma omp for schedule(static)
-        for (size_t t = 0; t < tiles_num_Y * tiles_num_X; ++t) {
-            const size_t tile_Y = t / tiles_num_X;
-            const size_t tile_X = t % tiles_num_X;
-            const size_t tile_offset_Y = tile_Y * tile_size_Y;
-            const size_t tile_offset_X = tile_X * tile_size_X;
-
-            for (size_t ii = 0; ii < blocks_per_tile_Y; ++ii) {
-                const size_t block_idx_Y = tile_Y * blocks_per_tile_Y + ii;
-                const size_t block_offset_Y = ii * block_size_Y;
-                const size_t i_min = tile_offset_Y + block_offset_Y;
-                if (i_min >= rows) continue;
-                const size_t i_max = std::min(i_min + block_size_Y, rows);
-
-                for (size_t jj = 0; jj < blocks_per_tile_X; ++jj) {
-                    const size_t block_idx_X = tile_X * blocks_per_tile_X + jj;
-                    const size_t block_offset_X = jj * block_size_X;
-                    const size_t j_min = tile_offset_X + block_offset_X;
-                    if (j_min >= cols) continue;
-                    const size_t j_max = std::min(j_min + block_size_X, cols);
-
-                    const size_t mx_scale_idx = block_idx_Y * scales_stride + block_idx_X;
-                    const size_t mx_scale_idx_gate = block_idx_Y * scales_stride + block_idx_X +
-                                                     cols / block_size_X;
-                    scale_block<IS_DGATED, IType, OType>(
-                        grad, input, output, output_scales, mx_scale_idx, mx_scale_idx_gate,
-                        thread_amax, i_min, i_max, j_min, j_max, cols, cache_buffer_act, cache_buffer_gate);
-                }
-            }
-        }
-        if (thread_amax > amax) {
-            amax = thread_amax;
-        }
-    }
-    ref_amax = amax;
-}
-
-template <bool IS_DGATED, typename IType, typename OType>
-void compute_ref_x2(const IType* grad,
-                    const IType* input,
-                    OType* output_rowwise,
-                    OType* output_colwise,
-                    fp8e8m0* scales_rowwise,
-                    fp8e8m0* scales_colwise,
-                    float& ref_amax,
-                    const size_t rows,
-                    const size_t cols,
-                    const size_t block_size_Y,
-                    const size_t block_size_X,
-                    const size_t scales_stride_rowwise,
-                    const size_t scales_stride_colwise) {
-    compute_ref_x1<IS_DGATED, IType, OType>(
-        grad, input, output_rowwise, scales_rowwise, ref_amax, rows, cols, 1, block_size_X, scales_stride_rowwise);
-    compute_ref_x1<IS_DGATED, IType, OType>(
-        grad, input, output_colwise, scales_colwise, ref_amax, rows, cols, block_size_Y, 1, scales_stride_colwise);
-}
-
-template <bool IS_DGATED, typename IType, typename OType>
 void compute_ref(const IType* grad,
                  const IType* input,
                  OType* output_rowwise,
@@ -530,16 +358,15 @@ void performTest_x2(const size_t rows,
 }
 
 std::vector<std::pair<size_t, size_t>> matrix_sizes = {
-    // {1, 32},
-    // {16, 64},
-    // {65, 96},
-    // {128, 128},
-    // {256, 256},
-    // {993, 512},
-    // {768, 1024},
-    // {65536, 128},
-    // {16384, 1632},
-    {4096, 13312},
+    {1, 32},
+    {16, 64},
+    {65, 96},
+    {128, 128},
+    {256, 256},
+    {993, 512},
+    {768, 1024},
+    {65536, 128},
+    {16384, 1632},
 };
 
 std::vector<std::pair<size_t, size_t>> block_sizes = {
@@ -616,10 +443,8 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Combine(
         ::testing::ValuesIn(matrix_sizes),
         ::testing::ValuesIn(block_sizes),
-        // ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
-        // ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
-        ::testing::Values(DType::kBFloat16),
-        ::testing::Values(DType::kFloat8E4M3),
+        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
+        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
         ::testing::ValuesIn(input_scenarios),
         ::testing::ValuesIn(is_dgated_op)),
     [](const testing::TestParamInfo<CastMXFP8_GatedActTestSuite::ParamType>& info) {
