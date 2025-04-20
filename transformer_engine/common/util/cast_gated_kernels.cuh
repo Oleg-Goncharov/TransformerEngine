@@ -268,12 +268,18 @@ namespace mxfp8_kernel {
 
 constexpr size_t CHUNK_DIM_Y = 64;
 constexpr size_t CHUNK_DIM_X = 64;
-constexpr size_t THREADS_PER_CHUNK = 64;
+constexpr size_t THREADS_PER_CHUNK_COLWISE = 128;
+constexpr size_t THREADS_PER_CHUNK_NON_COLWISE = CHUNK_DIM_X;
 
 constexpr size_t SCALE_DIM_Y = 32;
 constexpr size_t SCALE_DIM_X = 32;
 
 constexpr size_t BUFFS_NUM = 2;
+constexpr size_t BUFF_DIM_Y = 32;
+constexpr size_t BUFF_DIM_X = CHUNK_DIM_X;
+constexpr size_t BUFF_DIM = BUFF_DIM_Y * BUFF_DIM_X;
+static_assert(BUFF_DIM_Y == 32);
+
 constexpr size_t PACK_SIZE = 4;
 constexpr size_t WAVES = SCALE_DIM_X / PACK_SIZE;
 
@@ -293,7 +299,7 @@ constexpr __device__ __forceinline__ bool is_cached_act_op() {
 
 template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &), typename IType, typename OType,
-          bool ROWWISE_SCALING, bool COLWISE_SCALING>
+          bool ROWWISE_SCALING, bool COLWISE_SCALING, size_t THREADS_PER_CHUNK>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     cast_mxfp8_gated_kernel(const __grid_constant__ CUtensorMap tensor_map_grad,
                             const __grid_constant__ CUtensorMap tensor_map_input_act,
@@ -313,18 +319,14 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   using OType2 = std::conditional_t<std::is_same_v<OType, fp8e4m3>, ptx::fp8e4m3x2, ptx::fp8e5m2x2>;
   static_assert(sizeof(OType2) == 2);
 
-  constexpr size_t THREADS_X = CHUNK_DIM_X / SCALE_DIM_X;
-  constexpr size_t THREADS_Y = THREADS_PER_CHUNK / THREADS_X;
-
-  constexpr size_t BUFF_DIM_Y = THREADS_Y;
-  constexpr size_t BUFF_DIM_X = CHUNK_DIM_X;
-  constexpr size_t BUFF_DIM = BUFF_DIM_Y * BUFF_DIM_X;
-  static_assert(BUFF_DIM_Y == 32);
-
   constexpr size_t STAGES = CHUNK_DIM_Y / BUFF_DIM_Y;
   static_assert(STAGES >= 1);
 
   constexpr bool IS_CACHED_ACT_OP = ROWWISE_SCALING && COLWISE_SCALING && is_cached_act_op<ParamOP, ActOP>();
+  constexpr bool ONLY_COLWISE_SCALING = COLWISE_SCALING && (!ROWWISE_SCALING);
+  
+  // # of rows covered by one wave. Equal to the # of columnwise threads in Y dimension.  
+  constexpr int COLWISE_WAVEFRONT_SIZE = DIVUP(THREADS_PER_CHUNK, CHUNK_DIM_X);
 
   const int block_offset_Y = blockIdx.y * CHUNK_DIM_Y;
   const int block_offset_X = blockIdx.x * CHUNK_DIM_X;
@@ -333,10 +335,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const int scales_block_offset_Y_colwise = blockIdx.y * CHUNK_DIM_Y / SCALE_DIM_Y;
   const int scales_block_offset_X_colwise = blockIdx.x * CHUNK_DIM_X;
 
-  const int tid_Y_rowwise = threadIdx.x / THREADS_X;
-  const int tid_X_rowwise = threadIdx.x % THREADS_X;
-  const int tid_Y_colwise = 0;
-  const int tid_X_colwise = threadIdx.x;
+  constexpr size_t THREADS_X_ROWWISE = CHUNK_DIM_X / SCALE_DIM_X;
+
+  const int tid_Y_rowwise = threadIdx.x / THREADS_X_ROWWISE;
+  const int tid_X_rowwise = threadIdx.x % THREADS_X_ROWWISE;
+  const int tid_Y_colwise = threadIdx.x / CHUNK_DIM_X;
+  const int tid_X_colwise = threadIdx.x % CHUNK_DIM_X;
 
   const int thread_offset_Y_rowwise = tid_Y_rowwise;
   const int thread_offset_X_rowwise = tid_X_rowwise * SCALE_DIM_X;
@@ -348,7 +352,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const int row_base_colwise = block_offset_Y + thread_offset_Y_colwise;
   const int col_base_colwise = block_offset_X + thread_offset_X_colwise;
 
-  // const bool col_out_of_bounds_rowwise = (col_base_rowwise >= cols);
+  const bool col_out_of_bounds_rowwise = (col_base_rowwise >= cols);
   const bool col_out_of_bounds_colwise = (col_base_colwise >= cols);
 
   const int scales_offset_Y_rowwise = scales_block_offset_Y_rowwise + tid_Y_rowwise;
@@ -356,9 +360,15 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const int scales_offset_Y_colwise = scales_block_offset_Y_colwise + tid_Y_colwise;
   const int scales_offset_X_colwise = scales_block_offset_X_colwise + tid_X_colwise;
 
+  const int gate_scale_idx_offset_rowwise = (cols + SCALE_DIM_X - 1) / SCALE_DIM_X;
+  const int gate_scale_idx_offset_colwise = cols;
+
   // helps resolving bank conflicts in shmem
   const int thread_lane = threadIdx.x % THREADS_PER_WARP;
   const int bank_group = thread_lane / THREADS_PER_BANK;
+
+  constexpr int SUBAMAX_BUFF_DIM_Y = ONLY_COLWISE_SCALING ? COLWISE_WAVEFRONT_SIZE - 1 : 1;
+  __shared__ float subamax_colwise_buff[SUBAMAX_BUFF_DIM_Y][CHUNK_DIM_X];
 
   extern __shared__ __align__(TMA_SHMEM_ALIGNMENT) char dshmem[];
 
@@ -453,16 +463,16 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     ptx::mbarrier_wait_parity(&mbar[stage], parity);
 
     if constexpr (COLWISE_SCALING) {
-      const int shmem_offset_base_colwise = buff * BUFF_DIM + tid_X_colwise;
+      const int shmem_offset_base_colwise = buff * BUFF_DIM + tid_Y_colwise * BUFF_DIM_X + tid_X_colwise;
       float thread_amax_act = 0.0f;
       float thread_amax_gate = 0.0f;
-      float after_act_colwise[BUFF_DIM_Y];
-      float after_gate_colwise[BUFF_DIM_Y];
+      float after_act_colwise[BUFF_DIM_Y / COLWISE_WAVEFRONT_SIZE];
+      float after_gate_colwise[BUFF_DIM_Y / COLWISE_WAVEFRONT_SIZE];
 
       // 1. Read/Compute elements. Find MXFP8-block AMAX
       #pragma unroll
-      for (int i = 0; i < BUFF_DIM_Y; ++i) {
-        const int shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
+      for (int i = 0; i < SCALE_DIM_Y / COLWISE_WAVEFRONT_SIZE; ++i) {
+        const int shmem_offset_colwise = shmem_offset_base_colwise + i * COLWISE_WAVEFRONT_SIZE * BUFF_DIM_X;
 
         float act_elt = static_cast<float>(in_act_sh[shmem_offset_colwise]);
         float gate_elt = static_cast<float>(in_gate_sh[shmem_offset_colwise]);
@@ -511,28 +521,85 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         }
       }
 
+      if constexpr (ONLY_COLWISE_SCALING) {
+        // Threads, whose id along Y-dim is 0, don't need to store to shared memory,
+        // as they manage the columwise reduction of the amax 
+        if (tid_Y_colwise > 0) {
+          subamax_colwise_buff[tid_Y_colwise - 1][tid_X_colwise] = thread_amax_act;
+        }
+        __syncthreads();
+        if (tid_Y_colwise == 0) {
+          #pragma unroll
+          for (int t = 0; t < SUBAMAX_BUFF_DIM_Y; ++t) {
+            const float other_thread_amax = subamax_colwise_buff[t][tid_X_colwise];
+            __builtin_assume(thread_amax_act >= 0);
+            __builtin_assume(other_thread_amax >= 0);
+
+            thread_amax_act = fmaxf(thread_amax_act, other_thread_amax);
+          }
+          subamax_colwise_buff[0][tid_X_colwise] = thread_amax_act;
+        }
+        __syncthreads();
+
+        // All threads read the reduced amax (ACT)
+        thread_amax_act = subamax_colwise_buff[0][tid_X_colwise];
+
+        if constexpr (IS_DGATED) {
+          // Make sure the previous read of the ACT values has been completed,
+          // so the data are not rewritten  
+          __syncthreads();
+          if (tid_Y_colwise > 0) {
+            subamax_colwise_buff[tid_Y_colwise - 1][tid_X_colwise] = thread_amax_gate;
+          }
+          __syncthreads();
+          if (tid_Y_colwise == 0) {
+            #pragma unroll
+            for (int t = 0; t < SUBAMAX_BUFF_DIM_Y; ++t) {
+              const float other_thread_amax = subamax_colwise_buff[t][tid_X_colwise];
+              __builtin_assume(thread_amax_gate >= 0);
+              __builtin_assume(other_thread_amax >= 0);
+  
+              thread_amax_gate = fmaxf(thread_amax_gate, other_thread_amax);
+            }
+            subamax_colwise_buff[0][tid_X_colwise] = thread_amax_gate;
+          }
+          __syncthreads();
+  
+          // All threads read the reduced amax (GATE)
+          thread_amax_gate = subamax_colwise_buff[0][tid_X_colwise];
+        }
+      }
+
       // 2. Compute E8M0 scaling factor
       const e8m0_t biased_exponent_act = float_to_e8m0(thread_amax_act * Quantized_Limits<OType>::max_norm_rcp);
       
       const int global_scales_offset_Y = scales_offset_Y_colwise + stage;
       const int global_scales_offset_X = scales_offset_X_colwise;
       const int scale_idx = global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
-      scales_colwise[scale_idx] = biased_exponent_act;
+      const bool row_out_of_bounds_colwise = (row_base_colwise + stage_offset_Y) >= rows;
+      const bool out_of_bounds_colwise = row_out_of_bounds_colwise || col_out_of_bounds_colwise;
+
+      if (tid_Y_colwise == 0 && (!out_of_bounds_colwise)) {
+        scales_colwise[scale_idx] = biased_exponent_act;
+      }
       
       float block_scale_inverse_act = exp2f_rcp(biased_exponent_act);
       float block_scale_inverse_gate;
       
       if constexpr (IS_DGATED) {
         const e8m0_t biased_exponent_gate = float_to_e8m0(thread_amax_gate * Quantized_Limits<OType>::max_norm_rcp);
-        const int scale_idx_gate = scale_idx + scale_stride_colwise / 2;
-        scales_colwise[scale_idx_gate] = biased_exponent_gate;
+        // const int scale_idx_gate = scale_idx + scale_stride_colwise / 2;
+        const int scale_idx_gate = scale_idx + gate_scale_idx_offset_colwise;
+        if (tid_Y_colwise == 0 && (!out_of_bounds_colwise)) {
+          scales_colwise[scale_idx_gate] = biased_exponent_gate;
+        }
         block_scale_inverse_gate = exp2f_rcp(biased_exponent_gate);
       }
 
       // 3. Scale elements
       #pragma unroll
-      for (int i = 0; i < SCALE_DIM_Y; ++i) {
-        const int shmem_offset_elt = shmem_offset_base_colwise + i * BUFF_DIM_X;
+      for (int i = 0; i < SCALE_DIM_Y / COLWISE_WAVEFRONT_SIZE; ++i) {
+        const int shmem_offset_elt = shmem_offset_base_colwise + i * COLWISE_WAVEFRONT_SIZE * BUFF_DIM_X;
         if constexpr (IS_DGATED) {
           OType2 out_pair;
           float2 in_pair = {after_act_colwise[i], after_gate_colwise[i]};
@@ -565,7 +632,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         __syncthreads();
         IType2 thread_amax_2x_act = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
         IType2 thread_amax_2x_gate = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
-#pragma unroll
+        #pragma unroll
         for (int w = 0; w < WAVES; ++w) {
           const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
           const int swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
@@ -679,7 +746,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       const int stage_scales_offset_Y = scales_offset_Y_rowwise + stage_offset_Y;
       const int stage_scales_offset_X = scales_offset_X_rowwise;
       const int scale_idx = stage_scales_offset_Y * scale_stride_rowwise + stage_scales_offset_X;
-      scales_rowwise[scale_idx] = biased_exponent_act;
+      const bool row_out_of_bounds_rowwise = (row_base_rowwise + stage_offset_Y) >= rows;
+      const bool out_of_bounds_rowwise = row_out_of_bounds_rowwise || col_out_of_bounds_rowwise;
+      if (!out_of_bounds_rowwise) {
+        scales_rowwise[scale_idx] = biased_exponent_act;
+      }
       
       const float block_scale_inverse_act = exp2f_rcp(biased_exponent_act);
       const float2 block_scale_inverse_2x_act = make_float2(block_scale_inverse_act, block_scale_inverse_act);
@@ -688,8 +759,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       float2 block_scale_inverse_2x_gate;
       if constexpr (IS_DGATED) {
         const e8m0_t biased_exponent_gate = float_to_e8m0(thread_amax_gate * Quantized_Limits<OType>::max_norm_rcp);
-        const int scale_idx_gate = scale_idx + scale_stride_rowwise / 2;
-        scales_rowwise[scale_idx_gate] = biased_exponent_gate;
+        const int scale_idx_gate = scale_idx + gate_scale_idx_offset_rowwise;
+        if (!out_of_bounds_rowwise) {
+          scales_rowwise[scale_idx_gate] = biased_exponent_gate;
+        }
         block_scale_inverse_gate = exp2f_rcp(biased_exponent_gate);
         block_scale_inverse_2x_gate = make_float2(block_scale_inverse_gate, block_scale_inverse_gate);
       }
@@ -885,17 +958,22 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
   const size_t rows = gated_input.flat_first_dim();
   const size_t cols = gated_input.flat_last_dim() / 2;
   const size_t output_cols = (IS_DGATED ? 2 : 1) * cols;
-
-  constexpr size_t THREADS_X = mxfp8_kernel::CHUNK_DIM_X / mxfp8_kernel::SCALE_DIM_X;
-  constexpr size_t THREADS_Y = mxfp8_kernel::THREADS_PER_CHUNK / THREADS_X;
-  constexpr size_t BUFF_DIM_Y = THREADS_Y;
-  constexpr size_t BUFF_DIM_X = mxfp8_kernel::CHUNK_DIM_X;
-
+  
+  constexpr size_t BUFF_DIM_Y = mxfp8_kernel::BUFF_DIM_Y;
+  constexpr size_t BUFF_DIM_X = mxfp8_kernel::BUFF_DIM_X;
+  constexpr size_t BUFFS_NUM = mxfp8_kernel::BUFFS_NUM;
+  
   const size_t blocks_Y = DIVUP(rows, mxfp8_kernel::CHUNK_DIM_Y);
   const size_t blocks_X = DIVUP(cols, mxfp8_kernel::CHUNK_DIM_X);
+  
+  constexpr size_t THREADS_PER_CHUNK_COLWISE = mxfp8_kernel::THREADS_PER_CHUNK_COLWISE;
+  constexpr size_t THREADS_PER_CHUNK_NON_COLWISE = mxfp8_kernel::THREADS_PER_CHUNK_NON_COLWISE;
+  const size_t THREADS_PER_CHUNK =  (scaling_type == ScalingType::COLWISE)
+                                    ? THREADS_PER_CHUNK_COLWISE
+                                    : THREADS_PER_CHUNK_NON_COLWISE;
 
   const dim3 grid(blocks_X, blocks_Y);
-  const dim3 block_size(mxfp8_kernel::THREADS_PER_CHUNK);
+  const dim3 block_size(THREADS_PER_CHUNK);
 
   size_t scale_stride_rowwise = USE_ROWWISE_SCALING ? output->scale_inv.shape[1] : 1;
   size_t scale_stride_colwise = USE_COLWISE_SCALING ? output->columnwise_scale_inv.shape[1] : 1;
@@ -943,7 +1021,7 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
                                  BUFF_DIM_Y, BUFF_DIM_X, tensor_stride_elems, cols, sizeof(OType));
           }
 
-          const size_t buff_elems_total = BUFFERS_NUM * BUFF_DIM_Y * BUFF_DIM_X;
+          const size_t buff_elems_total = BUFFS_NUM * BUFF_DIM_Y * BUFF_DIM_X;
           const size_t buff_size_aligned_in = DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), ALIGNMENT_SIZE);
           const size_t buff_size_aligned_out = DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), ALIGNMENT_SIZE);
 
@@ -964,10 +1042,12 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
           switch (scaling_type) {
             case ScalingType::ROWWISE:
               cudaFuncSetAttribute(
-                  mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType, true, false>,
+                  mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP,
+                      IType, OType, true, false, THREADS_PER_CHUNK_NON_COLWISE>,
                   cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size);
     
-              mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType, true, false>
+              mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP,
+                  IType, OType, true, false, THREADS_PER_CHUNK_NON_COLWISE>
               <<<grid, block_size, shmem_size, stream>>>(
                   tensor_map_grad, tensor_map_input_act, tensor_map_input_gate,
                   tensor_map_output_act_rowwise, tensor_map_output_gate_rowwise,
@@ -977,10 +1057,12 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
               break;
             case ScalingType::COLWISE:
               cudaFuncSetAttribute(
-                  mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType, false, true>,
+                  mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP,
+                      IType, OType, false, true, THREADS_PER_CHUNK_COLWISE>,
                   cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size);
 
-              mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType, false, true>
+              mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP,
+                  IType, OType, false, true, THREADS_PER_CHUNK_COLWISE>
               <<<grid, block_size, shmem_size, stream>>>(
                   tensor_map_grad, tensor_map_input_act, tensor_map_input_gate,
                   tensor_map_output_act_rowwise, tensor_map_output_gate_rowwise,
@@ -990,10 +1072,12 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
               break;
             case ScalingType::BIDIMENSIONAL:
               cudaFuncSetAttribute(
-                  mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType, true, true>,
+                  mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP,
+                      IType, OType, true, true, THREADS_PER_CHUNK_NON_COLWISE>,
                   cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size);
 
-              mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType, true, true>
+              mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP,
+                  IType, OType, true, true, THREADS_PER_CHUNK_NON_COLWISE>
               <<<grid, block_size, shmem_size, stream>>>(
                   tensor_map_grad, tensor_map_input_act, tensor_map_input_gate,
                   tensor_map_output_act_rowwise, tensor_map_output_gate_rowwise,
