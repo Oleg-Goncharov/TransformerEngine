@@ -16,6 +16,7 @@
 
 #include "state_counter.cuh"
 #include "swizzle.cuh"
+#include "ptx.cuh"
 
 namespace transformer_engine {
 namespace mxfp8_kernel {
