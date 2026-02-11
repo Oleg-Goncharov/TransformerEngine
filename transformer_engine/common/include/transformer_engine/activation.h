@@ -164,7 +164,7 @@ void nvte_dgelu(const NVTETensor grad, const NVTETensor input, NVTETensor output
  *  \param[in]     stream    CUDA stream used for the operation.
  */
 void nvte_group_dgelu(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
-                      NVTETensor output, cudaStream_t stream);
+                      NVTEGroupedTensor output, cudaStream_t stream);
 
 /*! \brief Computes the SiLU activation gradient.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
@@ -188,7 +188,7 @@ void nvte_dsilu(const NVTETensor grad, const NVTETensor input, NVTETensor output
  *  \param[in]     stream    CUDA stream used for the operation.
  */
 void nvte_group_dsilu(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
-                      NVTETensor output, cudaStream_t stream);
+                      NVTEGroupedTensor output, cudaStream_t stream);
 
 /*! \brief Computes the ReLU activation gradient.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
@@ -212,7 +212,7 @@ void nvte_drelu(const NVTETensor grad, const NVTETensor input, NVTETensor output
  *  \param[in]     stream    CUDA stream used for the operation.
  */
 void nvte_group_drelu(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
-                      NVTETensor output, cudaStream_t stream);
+                      NVTEGroupedTensor output, cudaStream_t stream);
 
 /*! \brief Computes the Quick GeLU activation gradient.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
@@ -236,7 +236,7 @@ void nvte_dqgelu(const NVTETensor grad, const NVTETensor input, NVTETensor outpu
  *  \param[in]     stream    CUDA stream used for the operation.
  */
 void nvte_group_dqgelu(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
-                       NVTETensor output, cudaStream_t stream);
+                       NVTEGroupedTensor output, cudaStream_t stream);
 
 /*! \brief Computes the Squared ReLU activation gradient.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
@@ -260,7 +260,7 @@ void nvte_dsrelu(const NVTETensor grad, const NVTETensor input, NVTETensor outpu
  *  \param[in]     stream    CUDA stream used for the operation.
  */
 void nvte_group_dsrelu(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
-                       NVTETensor output, cudaStream_t stream);
+                       NVTEGroupedTensor output, cudaStream_t stream);
 
 /*! \brief Computes the gated GeLU activation of the input.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
