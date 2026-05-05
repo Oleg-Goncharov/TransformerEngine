@@ -664,10 +664,6 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
 
                     break;
                   }
-                  case ScalingType::COLWISE: {
-                    NVTE_WARN("Colwise scaling will fallback to original kernel.");
-                    break;
-                  }
                   case ScalingType::BIDIMENSIONAL: {
                     using traits = specialized::CastTraits<IType, OType, true, true>;
                     auto kernel = specialized::quantize_mxfp8_kernel_cast_only<traits>;
