@@ -644,7 +644,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
               with_gemm_swizzled_scales, WITH_GEMM_SWIZZLED_SCALES,
 
               if (specialized::hasSpec<IS_DBIAS, IS_DACT, IS_ACT, IType, OType>() &&
-                  !WITH_GEMM_SWIZZLED_SCALES) {
+                  !WITH_GEMM_SWIZZLED_SCALES && (scaling_type != ScalingType::COLWISE)) {
                 switch (scaling_type) {
                   case ScalingType::ROWWISE: {
                     using traits = specialized::CastTraits<IType, OType, true, false>;
