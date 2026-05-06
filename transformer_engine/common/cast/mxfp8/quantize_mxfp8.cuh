@@ -643,8 +643,18 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               with_gemm_swizzled_scales, WITH_GEMM_SWIZZLED_SCALES,
 
+              // The specialized rowwise cast-only kernel vectorizes full 32-element chunks.
+              // Shapes with a partial row tail (for example, N=48) must use the generic kernel,
+              // otherwise the last chunk reads/writes past the logical end of the row.
+              const bool is_full_rowwise_chunk =
+                (cols % specialized::CastTraits<IType, OType, true, false>::chunkElems == 0);
+
+              const bool scaling_type_has_specialized_support = 
+                (scaling_type == ScalingType::ROWWISE && is_full_rowwise_chunk) ||
+                (scaling_type == ScalingType::BIDIMENSIONAL);
+
               if (specialized::hasSpec<IS_DBIAS, IS_DACT, IS_ACT, IType, OType>() &&
-                  !WITH_GEMM_SWIZZLED_SCALES && (scaling_type != ScalingType::COLWISE)) {
+                  !WITH_GEMM_SWIZZLED_SCALES && scaling_type_has_specialized_support) {
                 switch (scaling_type) {
                   case ScalingType::ROWWISE: {
                     using traits = specialized::CastTraits<IType, OType, true, false>;
