@@ -650,9 +650,11 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
               using bidimensional_traits = specialized::CastTraits<IType, OType, true, true>;
               constexpr size_t max_grid_dim_y = 65535;
               const bool rowwise_specialized_grid_fits =
-                  ((rows + rowwise_traits::blockDimM - 1) / rowwise_traits::blockDimM) <= max_grid_dim_y;
+                  ((rows + rowwise_traits::blockDimM - 1) / rowwise_traits::blockDimM) <=
+                  max_grid_dim_y;
               const bool bidimensional_specialized_grid_fits =
-                  ((rows + bidimensional_traits::blockDIM::M - 1) / bidimensional_traits::blockDIM::M) <= max_grid_dim_y;
+                  ((rows + bidimensional_traits::blockDIM::M - 1) /
+                   bidimensional_traits::blockDIM::M) <= max_grid_dim_y;
 
               const bool is_full_rowwise_chunk = (cols % 128 == 0);
               const bool scaling_type_has_specialized_support =
@@ -834,8 +836,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
                       scale_stride_colwise);
                   break;
                 }
-              }
-              NVTE_CHECK_CUDA(cudaGetLastError());
+              } NVTE_CHECK_CUDA(cudaGetLastError());
 
               if constexpr (IS_DBIAS) {
                 common::reduce_dbias<IType>(workspace_ptr, dbias, dbias_rows, dbias_cols, stream);
