@@ -94,6 +94,30 @@ __device__ __forceinline__ float compute_global_encode_scaling_factor_FP4(const 
   return global_encode_scale;
 }
 
+// Compute "correct" per-block encoding scaling factor
+template <typename SF_TYPE>
+__device__ __forceinline__ SF_TYPE compute_scaling_coefficient(const nvfp4_scale_t S_dec_block,
+                                                               const float S_enc) {
+  NVTE_DEVICE_ERROR("Unsupported scaling-factor type. Only FP32 and BF16 are supported.");
+}
+
+template <>
+__device__ __forceinline__ float compute_scaling_coefficient<float>(const nvfp4_scale_t S_dec_block,
+                                                                    const float S_enc) {
+  const float S_dec = 1.0f / S_enc;
+  const float scale_rcp =
+      fminf(1.0f / (static_cast<float>(S_dec_block) * S_dec), detail::TypeExtrema<float>::max);
+  return scale_rcp;
+}
+
+template <>
+__device__ __forceinline__ bf16 compute_scaling_coefficient<bf16>(const nvfp4_scale_t S_dec_block,
+                                                                  const float S_enc) {
+  const float scale_rcp =
+      fminf(S_enc / (static_cast<float>(S_dec_block)), detail::TypeExtrema<bf16>::max);
+  return static_cast<bf16>(scale_rcp);
+}
+
 __device__ __forceinline__ uint32_t get_rbits(
     transformer_engine::curanddx::detail::philox4x32_native_state<NVTE_BUILD_NUM_PHILOX_ROUNDS>
         &rng,
